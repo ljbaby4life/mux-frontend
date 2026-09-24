@@ -6,6 +6,61 @@ automated tests verify.
 
 ---
 
+## #756 MUX_API_KEY / MUX_API_SECRET never client-bundled
+
+**Guard:** `src/lib/serverEnv.ts`  
+**Tests:** `src/lib/__tests__/serverEnv.test.ts`
+
+### Failure mode
+
+`MUX_API_KEY` and `MUX_API_SECRET` authenticate the frontend to the Mux
+backend. If either is read from a module that is imported by a client
+component, Next.js inlines the value into the client bundle and it is
+shipped to every browser. A leaked `MUX_API_SECRET` lets an attacker mint
+sessions, sign spends, or impersonate the app against the Mux API — a
+money-path and account-takeover gap.
+
+### What the implementation does
+
+- The secrets are read **only** in server-only modules (route handlers,
+  server actions, server utilities). They are never referenced from client
+  components or from shared modules that the client imports.
+- They are **never** exposed via `NEXT_PUBLIC_*` and are not passed through
+  any public-env passthrough in `next.config.ts`.
+- `src/lib/serverEnv.ts` is marked server-only and exposes a fail-closed
+  accessor. Accessing the secret from a client context, or with the required
+  server env missing, throws a typed `ServerEnvError` with a stable `code`
+  and a secret-free `message`:
+
+| Condition | Code |
+|---|---|
+| Secret accessed from a client context | `CLIENT_SECRET_ACCESS` |
+| Required server env missing | `MISSING_SERVER_ENV` |
+
+```ts
+import { getMuxApiCredentials } from '@/lib/serverEnv';
+
+// server-only: route handler / server action / server utility
+const { apiKey, apiSecret } = getMuxApiCredentials();
+```
+
+### Tests
+
+The test suite (`serverEnv.test.ts`) fails if:
+
+- The secret is read from a client context without throwing.
+- Missing required server env does not throw `MISSING_SERVER_ENV`.
+- Error messages leak the key or secret value.
+- The secret is re-exported from a client-importable module.
+
+### Production vs demo/mock split
+
+There is no mock path for credentials. The guard behaves identically in dev
+and production; in production a missing secret fails closed rather than
+falling back to a mock or empty value.
+
+---
+
 ## #754 Env validation never serves mocks in production
 
 **File:** `src/lib/envValidation.ts`  
@@ -221,55 +276,4 @@ involved. Behaviour is identical in dev and production.
 ## #704 Date range validation — analytics export DoS guard
 
 **File:** `src/lib/dateRangeValidation.ts`  
-**Hook:** `src/hooks/useAnalyticsExport.ts`  
-**Tests (unit):** `src/lib/__tests__/dateRangeValidation.test.ts`  
-**Tests (integration):** `src/hooks/__tests__/useAnalyticsExport.dateRange.test.ts`
-
-### Failure mode
-
-An analytics export with an inverted or excessively large date range (e.g.
-`from: today, to: 5 years ago` or a 3-year span) would send a request to
-the metrics API that it cannot efficiently serve, acting as a
-denial-of-service vector for the backend.
-
-### What the implementation does
-
-`validateDateRange` (in `src/lib/dateRangeValidation.ts`) rejects:
-
-| Condition | Default limit | Error field |
-|---|---|---|
-| Inverted range (start > end) | — | `range` |
-| Range span too large | 365 days | `range` |
-| Future start date | — | `from` |
-| Future end date | — | `to` |
-| Start more than N years in the past | 2 years | `from` |
-| Invalid date format | YYYY-MM-DD | `from`/`to` |
-| Calendar-impossible date (e.g. Feb 30) | — | `from`/`to` |
-
-All limits are configurable via the `options` parameter:
-
-```ts
-validateDateRange(range, {
-  maxDays: 90,       // tighter limit for a specific export type
-  maxYearsBack: 1,   // shorter historical window
-  allowFuture: true, // for scheduled/forecast exports
-});
-```
-
-`useAnalyticsExport` guards against the empty-data case (no transactions
-to export) and surfaces any export error as a non-null `errorMessage` so
-the UI can show a toast.
-
-### Tests
-
-The integration test suite (`useAnalyticsExport.dateRange.test.ts`) fails if:
-
-- `validateDateRange` no longer checks `fromDate > toDate`.
-- The `maxDays` guard is removed or its default is raised above 365.
-- `useAnalyticsExport` sends a request for an empty transaction set.
-- An export error is swallowed instead of surfaced as `errorMessage`.
-
-### Production vs demo/mock split
-
-`validateDateRange` is a pure function with no backend or mock path. The
-same validation runs in dev and production.
+**Hook:** `src/hooks/useAnalyticsExpor
