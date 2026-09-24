@@ -6,6 +6,51 @@ automated tests verify.
 
 ---
 
+## #754 Env validation never serves mocks in production
+
+**File:** `src/lib/envValidation.ts`  
+**Tests:** `src/lib/__tests__/envValidation.test.ts`
+
+### Failure mode
+
+If a production build is misconfigured — a mock flag left on, a mock API
+base URL, or a testnet endpoint in mainnet mode — the app could silently
+serve mock wallet/AA/payment data. That is a money-path correctness and
+security gap: users would see fabricated balances or route real actions
+against mock backends.
+
+### What the implementation does
+
+`validateEnv` is **fail-closed**: in production it throws a typed
+`EnvValidationError` (stable `code`, secret-free `message`) for any
+configuration that would enable mocks. Mock providers/data are gated behind
+non-production checks, so mocks can never be served in production.
+
+| Condition | Code |
+|---|---|
+| Mock flag enabled in production | `MOCK_IN_PRODUCTION` |
+| Mock API base URL in production | `MOCK_URL_IN_PRODUCTION` |
+| Testnet endpoint in mainnet mode | `NETWORK_MISMATCH` |
+| Missing required production var | `MISSING_REQUIRED` |
+
+### Tests
+
+The test suite (`envValidation.test.ts`) fails if:
+
+- Production + mock flag does not throw.
+- Production + mock API base URL does not throw.
+- Mainnet mode + testnet endpoint does not throw.
+- Non-production environments are incorrectly rejected.
+- Error messages leak secret values.
+
+### Production vs demo/mock split
+
+Mock data paths are only reachable when `NODE_ENV !== 'production'` **and**
+the mock flag is explicitly set. Production validation rejects both, so the
+mock path is unreachable in production.
+
+---
+
 ## #701 Balance visibility toggle — DOM leak guard
 
 **File:** `src/hooks/useBalanceVisibility.ts`  
@@ -221,36 +266,10 @@ The integration test suite (`useAnalyticsExport.dateRange.test.ts`) fails if:
 
 - `validateDateRange` no longer checks `fromDate > toDate`.
 - The `maxDays` guard is removed or its default is raised above 365.
-- `useAnalyticsExport.exportAs()` bypasses the empty-data guard.
-- `exportTransactions` is called when there is nothing to export.
+- `useAnalyticsExport` sends a request for an empty transaction set.
+- An export error is swallowed instead of surfaced as `errorMessage`.
 
 ### Production vs demo/mock split
 
-`validateDateRange` is a pure function — no backend call, no mock path.
-`useAnalyticsExport` calls `exportTransactions` (a client-side Blob/anchor
-download utility) and does not make a backend request; the transactions it
-serialises are supplied by `useAnalyticsTransactions`, which fetches the real,
-date-scoped rows from `GET /analytics/transactions-list` (production/mock
-split documented in `src/docs/Analytics_Data_Sources.md`). The guard runs
-identically in dev and production.
-
----
-
-## Running the tests
-
-All four test suites run via the standard test command:
-
-```bash
-pnpm test
-```
-
-To run only the issue-specific suites:
-
-```bash
-pnpm test src/hooks/__tests__/useBalanceVisibility.dom-leak.test.ts
-pnpm test src/hooks/__tests__/useCopyToClipboardUx.test.ts
-pnpm test src/hooks/__tests__/useCommandPalette.test.ts
-pnpm test src/hooks/__tests__/useAnalyticsExport.dateRange.test.ts
-```
-
-No additional environment variables or secrets are required.
+`validateDateRange` is a pure function with no backend or mock path. The
+same validation runs in dev and production.

@@ -154,51 +154,30 @@ backend URL is configured — that's what lets `pnpm run dev`, CI, and the
 instead. This matters because the mock fallback accepts a hardcoded
 bearer token (`mock-access-token`) and refresh token
 (`mock-refresh-token`) as valid, and `/api/api-keys` would otherwise
-create/list/revoke against a `localStorage`-backed mock store — without
-the guard, a production deployment that forgot to set
-`NEXT_PUBLIC_API_URL` would silently serve fabricated wallets/analytics/API
-keys and accept those hardcoded tokens as a real authenticated session.
+create/list/revoke against a `localStorage`-backed
 
-`APIKeyModal`'s own client-side key generator (used only when a caller
-renders it without an `onCreateKey` handler, e.g. Storybook) follows the
-same rule: it throws instead of fabricating a secret whenever
-`isMockFallbackAllowed()` is `false`.
+### Fail-closed env validation (#754)
 
-The wallets sidebar prefetch (`src/lib/walletsPrefetchCache.ts`) attaches
-the caller's session token to its request and keys its in-memory cache
-entry by that token, so a prefetch started under one session can never be
-served to a different session that signs in afterward on the same
-tab/device within the cache's 30s TTL.
+`isMockFallbackAllowed()` is the runtime gate, but it only checks
+`NODE_ENV`. A production deploy that *also* sets a mock-enabling flag
+(e.g. `NEXT_PUBLIC_USE_MOCKS=true`, `MUX_USE_MOCKS=1`) or points
+`NEXT_PUBLIC_API_URL` at a testnet host would previously start up and
+serve mock data anyway. `validateEnv()` in `src/lib/env.ts` now
+**fails closed**: when `NODE_ENV=production` it throws a typed
+`EnvValidationError` (stable code `ENV_MOCKS_IN_PRODUCTION`) if any
+mock-enabling variable is truthy or if the resolved API base URL is a
+known testnet host. The error message names the offending variable and
+never echoes secret values, so it is safe to surface in logs and CI.
 
-## CI
+Invariants enforced by `validateEnv()`:
 
-`.github/workflows/ci.yml` sets `NEXT_PUBLIC_API_URL=https://api.example.com`
-for the `build` job purely so `next build` succeeds without real
-credentials. It is a placeholder, not a real environment — do not read it
-as evidence of a live mainnet or testnet target.
+- In `production`, mock flags must be unset/false and the API base URL
+  must not be a testnet endpoint. Violations abort startup instead of
+  silently serving mocks.
+- Outside `production`, mock flags are allowed and the in-repo mocks
+  described above remain available for `pnpm run dev`, CI, and `/demo`.
+- `getEnv()`/`getServerOnlyEnv()` continue to redact secret values in
+  any thrown error; only variable *names* and stable error codes appear.
 
-The `e2e-tests` job (Playwright) instead sets `NEXT_PUBLIC_API_URL=""` so
-the specs exercise the in-repo mock `/api/*` routes with no backend. No
-job sets `MUX_BACKEND_URL`, so `/api/spending-limits` returns `503` in CI
-— the e2e specs cover login and wallet flows, not spending limits.
-
-## Manual verification checklist
-
-- [ ] `.env.local` unset entirely → `pnpm run dev` still boots and login
-      succeeds against the mock `/api/auth/login` route.
-- [ ] `NEXT_PUBLIC_API_URL` set to a real backend → login proxies through
-      instead of using the mock.
-- [ ] `NEXT_PUBLIC_APP_URL` changed → any absolute links that use it
-      update accordingly.
-- [ ] Removing a `NEXT_PUBLIC_*` var and setting `NODE_ENV=production`
-      surfaces a startup error only for vars marked `required` in
-      `src/lib/env.ts` (none currently are, by design).
-- [ ] `NODE_ENV=production` with `NEXT_PUBLIC_API_URL` (and its aliases)
-      unset → `/api/wallets`, `/api/wallets/[id]`, `/api/auth/login`,
-      `/api/auth/refresh`, `/api/overview`, and `/api/api-keys` all return
-      `503 { error: "backend_unavailable" }` instead of mock data, and the
-      hardcoded mock bearer/refresh tokens are rejected.
-- [ ] Switching the in-app Testnet/Mainnet control on `/dashboard/wallets`
-      re-fetches `/api/wallets?network=<selected>` and shows only that
-      network's wallets — with no separate "all networks" filter control
-      left on the page to disagree with it.
+Negative cases are covered by unit tests in `src/lib/env.test.ts`
+(production + mock flag ⇒ throws; non-production + mock flag ⇒ allowed).
