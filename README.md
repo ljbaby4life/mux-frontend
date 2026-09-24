@@ -245,3 +245,8 @@ stay easy to find and don't clutter the repo root as features evolve.
   follows the same production/mock split as the rest of the app instead of
   always serving mock data; see
   [`docs/team-access-and-audit-log.md`](docs/team-access-and-audit-log.md)
+
+## Handsoff notes
+
+<!-- handsoff-issue-753 -->
+- #753: Restore dashboard app routes required by Playwright e2e
