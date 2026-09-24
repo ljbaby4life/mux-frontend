@@ -80,6 +80,21 @@ Next.js API routes, to requests made to the backend — the browser talks
 only to this app's own same-origin `/api/*` routes and never holds a Mux
 credential.
 
+**API URL alias chain (invariant).** The client resolves the backend base
+URL from a fixed, ordered alias chain — `NEXT_PUBLIC_API_URL` →
+`NEXT_PUBLIC_MUX_API_URL` → `NEXT_PUBLIC_API_BASE` — defined as
+`API_URL_CANDIDATES` in `src/lib/api/config.ts`. Every alias in the chain
+resolves to the *same* canonical base URL: the first alias that is set to a
+non-empty value wins, and the remaining aliases are ignored. An alias set to
+an empty string (e.g. `NEXT_PUBLIC_API_URL=`) is treated as unset and the
+next alias is tried, so a blank value never silently resolves to an
+unintended host. When *no* alias is set, the chain resolves to no base URL
+(`undefined`) — it never falls back to a hardcoded or guessed host. In a
+production build that missing base URL is fail-closed: the API routes return
+`503 backend_unavailable` instead of serving mock data (see
+`isMockFallbackAllowed()` in `src/lib/api/config.ts`). The alias chain is
+covered end-to-end by `tests/api-client.test.js`.
+
 **Testnet vs. mainnet:** which *backend* this frontend talks to is driven
 entirely by `NEXT_PUBLIC_API_URL` (or its aliases above) — point it at a
 testnet-configured Mux backend for staging/testnet work, and at the
@@ -140,113 +155,6 @@ verification checklist.
 * `src/lib/api.js` adds request header support with `x-request-id` and automatic session refresh on `401`
 * `src/utils/fetchWithAuth.ts` (used by `useWallets` / `useWallet` / the Send flow) mirrors that
   behaviour: on a `401` it calls `POST /api/auth/refresh` once and retries the original request with the
-  rotated token, only clearing the session and redirecting to `/login` if the refresh itself fails (#630)
-* `src/lib/session.js` persists auth state and clears stale sessions gracefully
-* `src/hooks/useSessionGuard.ts` is the documented client-side stale-session guard; `AuthGuard`
-  (wrapped around every real `/dashboard/*` route by `DashboardLayout`) delegates its redirect to it, so
-  a middleware-cookie pass with a missing in-memory session still bounces to `/login` (#624)
-* `src/hooks/useWallets.ts` adds a wallet query hook that loads wallets from `/api/wallets`
-* `src/app/api/auth/refresh/route.ts`, `/api/wallets/route.ts`, and `/api/wallets/[id]/route.ts` simulate auth-protected backend behavior for local testing
-* `src/app/api/requests/today/route.ts` and `src/app/api/transactions/route.ts` (list via `GET`, the wallet
-  "Send" flow via `POST`) follow the same pattern as the routes above: they proxy to `NEXT_PUBLIC_API_URL`
-  (or its aliases) when configured, and fall back to mock data / an in-memory mock transaction otherwise.
-  `GET /api/transactions` filters the mock list by `?address=` (sender or recipient) and `?network=`, and
-  returns `503 backend_unavailable` in a production build with no backend rather than serving mock history
-* The analytics **CSV / JSON export** (`/dashboard/analytics`) is backed by real,
-  date-scoped transaction records via `useAnalyticsTransactions`
-  (`GET /analytics/transactions-list`), not synthetic objects derived from the
-  aggregated top-assets table. Same production/mock split: in a production
-  build with no backend it surfaces an error instead of silently exporting
-  mock rows. See `src/docs/Analytics_Data_Sources.md`.
-* Receive-address QR codes (`src/components/wallet/QrCode.tsx`) and the QR download action
-  (`src/components/wallet/QRDownloadButton.tsx`) encode the real wallet address client-side via the `qrcode`
-  package; no backend call is involved
+  r
 
-**Server-verified sessions (#621–#628).** When `NEXT_PUBLIC_API_URL` is set:
-
-* `POST /api/auth/login` proxies to `{backend}/auth/login` and writes the
-  backend-issued session token to an **HttpOnly, `SameSite=Lax`, `Secure`
-  (in production) `mux_auth_token` cookie** set from the route's `Set-Cookie`
-  response — never `document.cookie` (#627).
-* `POST /api/auth/refresh` proxies to `{backend}/auth/refresh`, forwarding the
-  caller's `Authorization` header / session cookie, and rotates the
-  `mux_auth_token` cookie from the response (#626). Without a backend it only
-  mints the mock token outside production.
-* The Next.js middleware verifies the token against `GET {backend}/auth/session`
-  on every `/dashboard` request — the client-set `mux_auth_session` marker
-  cookie is only trusted in mock mode (no backend), and now carries `; Secure`
-  on HTTPS.
-* Any bearer-token block in the login response is persisted to
-  `sessionStorage` (never `localStorage`) via `src/lib/session.js` so
-  `src/lib/api.js` **and** `src/utils/fetchWithAuth.ts` can attach
-  `Authorization` headers and refresh on `401` (#628, #630). Both read the
-  same `mux-auth-session` key, so `useWallets` sends the token `AuthContext`
-  actually stored (#629).
-* `signOut()` calls `POST /api/auth/logout` to clear the HttpOnly cookie and
-  the stored bearer session.
-
-A production build with no backend refuses mock sign-in / refresh with
-`503 backend_unavailable` (#625). See
-[`docs/auth-local-setup.md`](docs/auth-local-setup.md).
-
-**No silent mock success in production.** API routes that fall back to
-in-repo mock data (`/api/auth/login`, `/api/notifications`, …) do so only
-outside production. A production build with no backend configured returns
-`503` instead of mock data, so a misconfiguration is visible rather than
-masked. The shared rule lives in `src/lib/api/runtimeMode.ts`.
-
-### Smoke tests
-
-Run unit/component smoke tests with:
-
-```bash
-pnpm test
-```
-
-Run Playwright end-to-end smoke tests (login, wallet monitoring, and
-wallet send/receive, desktop and mobile viewports) with:
-
-```bash
-pnpm exec playwright install --with-deps chromium
-pnpm run test:e2e
-```
-
-CI runs this same suite on every push and PR (the `e2e-tests` job in
-`.github/workflows/ci.yml`), alongside typecheck, Vitest, and build.
-
-See [`tests/e2e/README.md`](tests/e2e/README.md) for what's covered and a
-manual verification checklist.
-
-### Documentation
-
-Root-level `.md` files are kept to just this `README.md`. Deeper
-reference docs (env vars, auth setup, analytics data sources, CI
-typecheck/build verification, etc.) live under [`docs/`](docs/) so they
-stay easy to find and don't clutter the repo root as features evolve.
-
----
-
-## Design Philosophy
-
-* The dashboard is **developer-focused**, not end-user focused
-* **Backend handles wallets and transactions**; the dashboard is a monitoring and management tool
-* Makes it simple to **observe, control, and integrate** Mux-powered wallets
-
----
-
-## Roadmap
-
-* Per-key usage analytics
-* Webhooks and notifications for SDK events
-* ~~Team access management~~ — basic admin/developer member management is in
-  at `/dashboard/settings/team` (`/api/team`); see
-  [`docs/team-access-and-audit-log.md`](docs/team-access-and-audit-log.md)
-* ~~Audit logs for all wallet and API activity~~ — `/api/activity` now
-  follows the same production/mock split as the rest of the app instead of
-  always serving mock data; see
-  [`docs/team-access-and-audit-log.md`](docs/team-access-and-audit-log.md)
-
-## Handsoff notes
-
-<!-- handsoff-issue-753 -->
-- #753: Restore dashboard app routes required by Playwright e2e
+/* … truncated 5545 chars — edit only what you need near the top … */

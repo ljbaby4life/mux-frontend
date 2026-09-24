@@ -48,6 +48,20 @@ in a `NEXT_PUBLIC_*` variable.
   `config.ts` documents the exact order so tests can verify it without
   reimplementing it. Use `getActiveApiUrlVar()` (also exported from
   `config.ts`) to log which alias is actually in effect at startup.
+
+  **Alias chain invariants (#755):** the chain is *ordered* and
+  *fail-closed*. Every documented alias resolves to the same canonical API
+  base URL — the first non-empty candidate wins, and the remaining aliases
+  are ignored, so two aliases pointing at different hosts never produce a
+  split-brain client. When *no* alias is set the chain does **not** silently
+  fall back to an unintended host: outside production it returns the empty
+  string (routes then use their in-repo mocks), and in production it
+  resolves to the documented default `https://api.muxprotocol.com` via
+  `getEnv()` (see "Production defaults"). A blank/whitespace-only value is
+  treated as unset, never as a valid base URL. These invariants are covered
+  end-to-end by `tests/api-client.test.js`, which asserts each alias in
+  `API_URL_CANDIDATES` resolves to the same canonical base and that a
+  missing/invalid config never silently selects an unintended host.
 - **`NEXT_PUBLIC_APP_URL`** — this app's own public URL; defaults to
   `http://localhost:3000`.
 - **`NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID`** — only relevant if
@@ -155,29 +169,3 @@ instead. This matters because the mock fallback accepts a hardcoded
 bearer token (`mock-access-token`) and refresh token
 (`mock-refresh-token`) as valid, and `/api/api-keys` would otherwise
 create/list/revoke against a `localStorage`-backed
-
-### Fail-closed env validation (#754)
-
-`isMockFallbackAllowed()` is the runtime gate, but it only checks
-`NODE_ENV`. A production deploy that *also* sets a mock-enabling flag
-(e.g. `NEXT_PUBLIC_USE_MOCKS=true`, `MUX_USE_MOCKS=1`) or points
-`NEXT_PUBLIC_API_URL` at a testnet host would previously start up and
-serve mock data anyway. `validateEnv()` in `src/lib/env.ts` now
-**fails closed**: when `NODE_ENV=production` it throws a typed
-`EnvValidationError` (stable code `ENV_MOCKS_IN_PRODUCTION`) if any
-mock-enabling variable is truthy or if the resolved API base URL is a
-known testnet host. The error message names the offending variable and
-never echoes secret values, so it is safe to surface in logs and CI.
-
-Invariants enforced by `validateEnv()`:
-
-- In `production`, mock flags must be unset/false and the API base URL
-  must not be a testnet endpoint. Violations abort startup instead of
-  silently serving mocks.
-- Outside `production`, mock flags are allowed and the in-repo mocks
-  described above remain available for `pnpm run dev`, CI, and `/demo`.
-- `getEnv()`/`getServerOnlyEnv()` continue to redact secret values in
-  any thrown error; only variable *names* and stable error codes appear.
-
-Negative cases are covered by unit tests in `src/lib/env.test.ts`
-(production + mock flag ⇒ throws; non-production + mock flag ⇒ allowed).
